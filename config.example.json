@@ -8,6 +8,9 @@
     "embed_color": "0x5865F2",
     "mongodb_uri": "mongodb://localhost:27017",
     "mongodb_db_name": "example_bot",
+    "mongodb_max_pool_size": 20,
+    "mongodb_min_pool_size": 0,
+    "mongodb_timeout_ms": 5000,
     "log_level": "INFO",
     "logs_dir": "logs",
     "sync_commands_on_startup": false

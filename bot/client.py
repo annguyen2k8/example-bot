@@ -136,15 +136,16 @@ class ExampleBot(commands.Bot):
             logger.error("Failed to sync application commands: %s", error, exc_info=True)
 
     async def close(self) -> None:
-        """Gracefully shutdown bot services, closing database connections and gateway sessions."""
+        """Gracefully shutdown bot services, closing gateway sessions and database connections."""
         logger.info("Bot is shutting down...")
-        if self.mongo is not None and self.mongo.is_connected:
-            try:
-                await self.mongo.disconnect()
-            except Exception as e:
-                logger.error("Error while disconnecting MongoDB: %s", e)
-
-        await super().close()
+        try:
+            await super().close()
+        finally:
+            if self.mongo is not None and self.mongo.is_connected:
+                try:
+                    await self.mongo.disconnect()
+                except Exception as e:
+                    logger.error("Error while disconnecting MongoDB: %s", e)
         logger.info("Bot shutdown completed.")
 
     async def on_ready(self) -> None:

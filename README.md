@@ -1,14 +1,15 @@
 # ExampleBot
 
-A modern, modular, type-safe Discord bot built with [discord.py](https://github.com/Rapptz/discord.py) (v2.3+) and asynchronous [MongoDB](https://www.mongodb.com/) via [Motor](https://motor.readthedocs.io/).
+A modern, modular, type-safe Discord bot built with [discord.py](https://github.com/Rapptz/discord.py) (v2.3+) and native asynchronous [MongoDB](https://www.mongodb.com/) via [PyMongo Async API](https://pymongo.readthedocs.io/).
 
 ---
 
 ## Overview
 
 ExampleBot provides a robust, production-ready foundation for Discord bots with:
-- **Centralized Configuration**: Environment variables (`.env`) with JSON fallback.
-- **Asynchronous MongoDB Integration**: Connection pooling, lifecycle management, health checks, and a Data Access Layer (DAL) / Repository pattern.
+- **Centralized Configuration**: Environment variables (`.env`) with JSON fallback and connection pool tuning.
+- **Native Asynchronous MongoDB**: Powered by PyMongo 4.9+ `AsyncMongoClient`, avoiding deprecated drivers (`motor`) and external threadpool overhead.
+- **Domain Repositories**: Focused Data Access Layer with automated, idempotent index management.
 - **Dynamic Cog Loader**: Safe discovery of modular command extensions without blocking loops.
 - **Structured Centralized Logging**: Timestamps, rotating file handlers, and severity formatting.
 - **Full Backward Compatibility**: Legacy utility imports (`utils.formating`) and original command names (`ping`, `uptime`, `link`) remain fully supported.
@@ -27,7 +28,7 @@ example-bot/
 ├── database/
 │   ├── connection.py           # MongoManager (pooling, connect, disconnect, health checks)
 │   └── repositories/
-│       ├── base.py             # Generic typed BaseRepository with async CRUD
+│       ├── base.py             # Minimal BaseRepository interface
 │       ├── guild_settings.py   # Per-guild configuration repository
 │       └── bot_stats.py        # Command invocation and metrics repository
 ├── cogs/
@@ -96,6 +97,9 @@ EMBED_COLOR=0x5865F2
 # MongoDB Database (leave empty or unset if not using database)
 MONGODB_URI=mongodb://localhost:27017
 MONGODB_DB_NAME=example_bot
+MONGODB_MAX_POOL_SIZE=20
+MONGODB_MIN_POOL_SIZE=0
+MONGODB_TIMEOUT_MS=5000
 
 # Operational Settings
 LOG_LEVEL=INFO
@@ -109,11 +113,12 @@ Alternatively, you can provide configuration via `config.json` (see `config.exam
 
 ## MongoDB Setup
 
-ExampleBot integrates an asynchronous Data Access Layer using `motor.motor_asyncio`:
-- **Connection Pooling**: Managed via `MongoManager` with configurable pool sizing (`maxPoolSize`, `minPoolSize`).
+ExampleBot integrates an asynchronous Data Access Layer using PyMongo's native `AsyncMongoClient`:
+- **Native Async**: Uses standard Python `asyncio` coroutines directly without threadpool delegation.
+- **Connection Pooling**: Configurable connection pool (`MONGODB_MAX_POOL_SIZE=20`, `MONGODB_MIN_POOL_SIZE=0` to scale down sockets when idle and conserve Atlas M0 quotas).
 - **Health Checks**: The bot can run round-trip latency pings (`db_status` command).
 - **Graceful Lifecycle**: Sockets are initialized during `setup_hook` and closed when the bot shuts down.
-- **Repositories**: Extensible CRUD repository layer with automated index creation:
+- **Repositories**: Clean domain-driven repository layer with automated index creation:
   - `GuildSettingsRepository` (unique index on `guild_id`)
   - `BotStatsRepository` (unique index on `command_name`)
 
@@ -148,4 +153,4 @@ Run the full automated test suite with `pytest`:
 pytest -v
 ```
 
-All 27 unit tests use mocked Discord and MongoDB interfaces and execute offline without needing external network credentials.
+All 30 unit and integration tests execute offline without requiring active external Discord or MongoDB credentials.

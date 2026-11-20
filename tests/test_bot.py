@@ -5,6 +5,7 @@ from __future__ import annotations
 import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
+from pymongo.errors import ConnectionFailure
 
 from bot.client import ExampleBot
 from bot.config import BotConfig
@@ -41,13 +42,30 @@ async def test_bot_lifecycle_and_close(test_config: BotConfig) -> None:
     with patch.object(bot, "is_closed", return_value=False):
         with patch("discord.ext.commands.Bot.close", new_callable=AsyncMock) as mock_super_close:
             await bot.close()
-            mock_mongo.disconnect.assert_called_once()
             mock_super_close.assert_called_once()
+            mock_mongo.disconnect.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_setup_hook_handles_db_failure(test_config: BotConfig) -> None:
+    """Ensure database connection failure during setup_hook does not crash startup."""
+    mock_mongo = MagicMock(spec=MongoManager)
+    mock_mongo.is_connected = False
+    mock_mongo.connect = AsyncMock(side_effect=ConnectionFailure("Database down"))
+
+    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+
+    with patch.object(bot, "load_cogs", new_callable=AsyncMock) as mock_load_cogs:
+        await bot.setup_hook()
+        mock_mongo.connect.assert_called_once()
+        # Cog loading must still proceed so bot can run in offline mode
+        mock_load_cogs.assert_called_once()
+        assert bot.guild_settings is None
+        assert bot.bot_stats is None
 
 
 @pytest.mark.asyncio
 async def test_load_cogs_safe_and_resilient(tmp_path: pathlib.Path, test_config: BotConfig) -> None:
-    # Setup temporary cogs directory with valid cog, bad cog, and __pycache__
     cogs_dir = tmp_path / "cogs"
     cogs_dir.mkdir()
 
@@ -65,7 +83,6 @@ async def test_load_cogs_safe_and_resilient(tmp_path: pathlib.Path, test_config:
     (cogs_dir / "single.py").write_text("# single", encoding="utf-8")
 
     bot = ExampleBot(config=test_config)
-
     loaded_extensions = []
 
     async def mock_load_extension(ext: str) -> None:

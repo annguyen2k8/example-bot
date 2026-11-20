@@ -43,31 +43,23 @@ async def async_main(config: Optional[BotConfig] = None) -> None:
         mongo_manager = MongoManager(
             uri=config.mongodb_uri,
             db_name=config.mongodb_db_name,
+            max_pool_size=config.mongodb_max_pool_size,
+            min_pool_size=config.mongodb_min_pool_size,
+            server_selection_timeout_ms=config.mongodb_timeout_ms,
+            connect_timeout_ms=config.mongodb_timeout_ms,
         )
 
     bot = ExampleBot(config=config, mongo_manager=mongo_manager)
 
-    loop = asyncio.get_running_loop()
-
-    # Register OS signals for graceful shutdown when supported
-    if sys.platform != "win32":
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            try:
-                loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.close()))
-            except (NotImplementedError, RuntimeError):
-                pass
-
     try:
-        logger.info("Starting bot gateway connection...")
-        await bot.start(config.token)
-    except asyncio.CancelledError:
-        logger.info("Main loop received cancellation signal.")
+        async with bot:
+            logger.info("Starting bot gateway connection...")
+            await bot.start(config.token)
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        logger.info("Bot execution stopped.")
     except Exception as e:
         logger.critical("Fatal error encountered during bot runtime: %s", e, exc_info=True)
         sys.exit(1)
-    finally:
-        if not bot.is_closed():
-            await bot.close()
 
 
 def start_bot(config_source: Optional[Union[Dict[str, Any], BotConfig, str]] = None) -> None:

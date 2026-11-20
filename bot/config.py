@@ -24,6 +24,9 @@ class BotConfig:
     embed_color: Optional[int] = None
     mongodb_uri: Optional[str] = None
     mongodb_db_name: str = "example_bot"
+    mongodb_max_pool_size: int = 20
+    mongodb_min_pool_size: int = 0
+    mongodb_timeout_ms: int = 5000
     log_level: str = "INFO"
     logs_dir: str = "logs"
     sync_commands_on_startup: bool = False
@@ -52,7 +55,6 @@ class BotConfig:
                 with open(target_path, "r", encoding="utf-8") as f:
                     json_data = json.load(f)
             except Exception as e:
-                # Malformed JSON or read error should not silence failure silently
                 raise ValueError(f"Failed to parse config file at {target_path}: {e}") from e
 
         # 1. Token
@@ -61,7 +63,6 @@ class BotConfig:
         # 2. Command Prefix
         prefix_env = os.getenv("COMMAND_PREFIX")
         if prefix_env is not None:
-            # Handle comma-separated prefixes e.g. "!,?"
             prefixes = [p.strip() for p in prefix_env.split(",") if p.strip()]
             command_prefix = prefixes if prefixes else ["!", "?"]
         elif "command_prefix" in json_data:
@@ -102,6 +103,17 @@ class BotConfig:
             or "example_bot"
         )
 
+        def _get_int(env_name: str, json_key: str, default: int) -> int:
+            raw = os.getenv(env_name, json_data.get(json_key, default))
+            try:
+                return int(raw)
+            except (ValueError, TypeError):
+                return default
+
+        mongodb_max_pool_size = _get_int("MONGODB_MAX_POOL_SIZE", "mongodb_max_pool_size", 20)
+        mongodb_min_pool_size = _get_int("MONGODB_MIN_POOL_SIZE", "mongodb_min_pool_size", 0)
+        mongodb_timeout_ms = _get_int("MONGODB_TIMEOUT_MS", "mongodb_timeout_ms", 5000)
+
         # 6. Logging settings
         log_level = os.getenv("LOG_LEVEL", json_data.get("log_level", "INFO")).upper()
         logs_dir = os.getenv("LOGS_DIR", json_data.get("logs_dir", "logs"))
@@ -120,6 +132,9 @@ class BotConfig:
             embed_color=embed_color,
             mongodb_uri=mongodb_uri,
             mongodb_db_name=mongodb_db_name,
+            mongodb_max_pool_size=mongodb_max_pool_size,
+            mongodb_min_pool_size=mongodb_min_pool_size,
+            mongodb_timeout_ms=mongodb_timeout_ms,
             log_level=log_level,
             logs_dir=logs_dir,
             sync_commands_on_startup=sync_commands,

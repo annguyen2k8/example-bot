@@ -9,7 +9,10 @@ import discord
 from discord.ext import commands
 from discord.utils import oauth_url
 
+from bot.logging import get_logger
 from utils.formatting import bold, format_time, inline
+
+logger = get_logger("cogs.example")
 
 if TYPE_CHECKING:
     from bot.client import ExampleBot
@@ -86,8 +89,8 @@ class ExampleCog(commands.Cog, name="Example"):
                 if top_cmds:
                     cmd_summary = ", ".join(f"{c['command_name']} ({c['total_uses']})" for c in top_cmds)
                     status_text += f"\nTop Commands: {cmd_summary}"
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Failed to fetch top command metrics: %s", e)
 
         await ctx.reply(status_text)
 
