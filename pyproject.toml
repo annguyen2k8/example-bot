@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "example-bot"
+version = "0.2.0"
+description = "A modular and extensible Discord bot with asynchronous MongoDB integration."
+readme = "README.md"
+requires-python = ">=3.9"
+dependencies = [
+    "discord.py>=2.3.0",
+    "motor>=3.3.0",
+    "pymongo>=4.6.0",
+    "python-dotenv>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+python_files = ["test_*.py"]

@@ -1,128 +1,100 @@
-import os
-import sys
-import json
-import time
-import pathlib
+"""Application entry point for ExampleBot.
+
+Handles configuration loading, logging initialization, database lifecycle,
+and Discord bot bootstrap.
+"""
+
+from __future__ import annotations
+
 import asyncio
-import warnings
-import datetime
-import traceback
+import os
+import signal
+import sys
+from typing import Any, Dict, Optional, Union
 
-from typing import *
+from bot.client import ExampleBot
+from bot.config import BotConfig
+from bot.logging import get_logger, setup_logging
+from database.connection import MongoManager
 
-import logging
-import logging.handlers
-from logging import Logger
+logger = get_logger("bootstrap")
 
-import discord
-from discord import app_commands
-from discord.ext import commands
 
-from utils.formating import *
+async def async_main(config: Optional[BotConfig] = None) -> None:
+    """Asynchronous entry point orchestrating bot and database lifecycle."""
+    if config is None:
+        config = BotConfig.load()
 
-class Bot(commands.Bot):
-    def __init__(self, config:Dict) -> None:
-        intents = discord.Intents.all()
-        
-        self.start_time = datetime.datetime.now()
-        super().__init__(
-            command_prefix=config.pop('command_prefix', ['!', '?']),
-            description=config.pop('description', None),
-            intents=intents
+    setup_logging(
+        logs_dir=config.logs_dir,
+        log_level=config.log_level,
+    )
+
+    if not config.token or config.token == "<token>":
+        logger.critical(
+            "Discord bot token is missing or unset. "
+            "Please set DISCORD_TOKEN in .env or provide 'token' in config.json."
         )
-        self.config = kwargs['config']
-        self.logger = set_logger(self)
-    
-    async def setup_hook(self) -> None:
-        self.loop.create_task(self.load_cogs())     
+        sys.exit(1)
 
-    async def load_cogs(self) -> None:
-        """
-        Loads all cogs in folder.
-        """
-        await self.wait_until_ready()
-        await asyncio.sleep(0.1)
-        loaded_cogs = []
-        failed_cogs = []
-        cogs_directory = pathlib.Path('./cogs')
-        for cog in cogs_directory.iterdir():
-            cog_name = cog.name
-            success = False
-            while not success:
-                try:
-                    await self.load_extension(f'cogs.{cog_name}.main')
-                    loaded_cogs.append(cog_name)
-                    self.logger.info(f"Loaded {cog_name}'s cog")
-                    success = True
-                except Exception as e:
-                    self.logger.error(f"Error to load {cog_name} cog")
-                    failed_cogs.append(cog_name)
-                    self.logger.exception(e)
-                    await asyncio.sleep(5)
-        
-        await self.sync_commands()
-    
-    async def sync_commands(self) -> None:
-        try:
-            sync = await self.tree.sync()
-            self.logger.info(f"Total {len(sync)} slash commands, {len(self.commands)} normal commands")
-        except Exception as error:
-            self.logger.error(error)
-    
-    async def on_ready(self) -> None:
-        now = datetime.datetime.now()
-        elapsed_time = now - self.start_time
-        self.logger.info(f"Logged bot's {self.user} (ID: {self.application.id})")
-        self.logger.info(f"Took {round(elapsed_time.total_seconds()*1000)}ms to start")
-
-    async def on_command_error(self, ctx:commands.Context, error:commands.errors.CommandError):
-        if isinstance(error, commands.MissingPermissions):
-            return await ctx.send("You don't have permission to use this command")
-        self.logger.exception(error)
-        
-        # owner = self.application.owner
-        # channel = await owner.create_dm()
-        # await channel.send(
-        #     f"{box(traceback.format_exc())}\n" + \
-        #     f"User: {ctx.author}\n" + \
-        #     f"Content: {ctx.message.content}\n" + \
-        #     f"Args: {error.args}"
-        #     )
-
-def set_logger(bot:commands.Bot) -> Logger:
-    logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    
-    while logger.hasHandlers():
-        logger.removeHandler(logger.handlers[0])
-
-    log_format = logging.Formatter(
-        '{asctime} {levelname:<8} {module}.{funcName} '
-        '{message}',
-        datefmt="[%Y-%m-%d %H:%M:%S]",
-        style='{'
+    mongo_manager: Optional[MongoManager] = None
+    if config.mongodb_uri:
+        logger.info("Initializing MongoDB manager...")
+        mongo_manager = MongoManager(
+            uri=config.mongodb_uri,
+            db_name=config.mongodb_db_name,
         )
-    
-    dpy_handler = logging.StreamHandler()
-    dpy_handler.setFormatter(log_format)
-    logger.addHandler(dpy_handler)
-    
-    fhandler = logging.handlers.RotatingFileHandler(
-        filename=f'logs/{bot.start_time.strftime("%Y-%m-%d")}.log',
-        maxBytes=10**7,
-        backupCount=5
+
+    bot = ExampleBot(config=config, mongo_manager=mongo_manager)
+
+    loop = asyncio.get_running_loop()
+
+    # Register OS signals for graceful shutdown when supported
+    if sys.platform != "win32":
+        for sig in (signal.SIGINT, signal.SIGTERM):
+            try:
+                loop.add_signal_handler(sig, lambda: asyncio.create_task(bot.close()))
+            except (NotImplementedError, RuntimeError):
+                pass
+
+    try:
+        logger.info("Starting bot gateway connection...")
+        await bot.start(config.token)
+    except asyncio.CancelledError:
+        logger.info("Main loop received cancellation signal.")
+    except Exception as e:
+        logger.critical("Fatal error encountered during bot runtime: %s", e, exc_info=True)
+        sys.exit(1)
+    finally:
+        if not bot.is_closed():
+            await bot.close()
+
+
+def start_bot(config_source: Optional[Union[Dict[str, Any], BotConfig, str]] = None) -> None:
+    """Synchronous launcher provided for backward compatibility."""
+    if isinstance(config_source, BotConfig):
+        cfg = config_source
+    elif isinstance(config_source, dict):
+        cfg = BotConfig(
+            token=config_source.get("token", ""),
+            command_prefix=config_source.get("command_prefix", ["!", "?"]),
+            description=config_source.get("description", "I'm a example bot!"),
+            embed_color=config_source.get("embed_color"),
+            mongodb_uri=config_source.get("mongodb_uri"),
+            mongodb_db_name=config_source.get("mongodb_db_name", "example_bot"),
+            log_level=config_source.get("log_level", "INFO"),
+            logs_dir=config_source.get("logs_dir", "logs"),
         )
-    fhandler.setFormatter(log_format)
-    logger.addHandler(fhandler)
+    elif isinstance(config_source, str):
+        cfg = BotConfig.load(config_source)
+    else:
+        cfg = BotConfig.load()
 
-    return logger
+    try:
+        asyncio.run(async_main(cfg))
+    except KeyboardInterrupt:
+        logger.info("Terminated by user keyboard interrupt.")
 
-def start_bot(config) -> None:
-    bot = Bot(config)
-    bot.run(config.pop('token'), log_handler=None)
 
-if __name__ == '__main__':
-    warnings.filterwarnings('ignore')
-    config = json.loads(open('config.json').read())
-    
-    start_bot(config)
+if __name__ == "__main__":
+    start_bot()

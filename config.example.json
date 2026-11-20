@@ -1,8 +1,14 @@
 {
-    "command_prefix": [
-        "!", "?"
-    ],
     "token": "<token>",
+    "command_prefix": [
+        "!",
+        "?"
+    ],
     "description": "I'm a example bot!",
-    "embed_color": null
+    "embed_color": "0x5865F2",
+    "mongodb_uri": "mongodb://localhost:27017",
+    "mongodb_db_name": "example_bot",
+    "log_level": "INFO",
+    "logs_dir": "logs",
+    "sync_commands_on_startup": false
 }
