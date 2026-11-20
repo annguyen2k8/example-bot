@@ -9,6 +9,9 @@ A modern, modular, type-safe Discord bot built with [discord.py](https://github.
 ExampleBot provides a robust, production-ready foundation for Discord bots with:
 - **Centralized Configuration**: Environment variables (`.env`) with JSON fallback and connection pool tuning.
 - **Native Asynchronous MongoDB**: Powered by PyMongo 4.9+ `AsyncMongoClient`, avoiding deprecated drivers (`motor`) and external threadpool overhead.
+- **Degraded Offline Resilience**: Bot operates smoothly in offline mode if MongoDB is unavailable; commands degrade gracefully without crashing, and reconnect dynamically when the database returns.
+- **Graceful Shutdown**: Active in-flight commands and background tasks complete before database sockets are disconnected.
+- **Dynamic Guild Prefixes**: Server-specific command prefixes stored in MongoDB with automatic fallback to default prefixes.
 - **Domain Repositories**: Focused Data Access Layer with automated, idempotent index management.
 - **Dynamic Cog Loader**: Safe discovery of modular command extensions without blocking loops.
 - **Structured Centralized Logging**: Timestamps, rotating file handlers, and severity formatting.
@@ -22,7 +25,7 @@ ExampleBot provides a robust, production-ready foundation for Discord bots with:
 example-bot/
 ├── main.py                     # Application entry point & lifecycle bootstrap
 ├── bot/
-│   ├── client.py               # ExampleBot subclass (lifecycle hooks, cog loading)
+│   ├── client.py               # ExampleBot subclass (dynamic prefix, in-flight task tracking, lifecycle)
 │   ├── config.py               # Centralized configuration dataclass
 │   └── logging.py              # Centralized rotating file & stream logger
 ├── database/
@@ -116,8 +119,8 @@ Alternatively, you can provide configuration via `config.json` (see `config.exam
 ExampleBot integrates an asynchronous Data Access Layer using PyMongo's native `AsyncMongoClient`:
 - **Native Async**: Uses standard Python `asyncio` coroutines directly without threadpool delegation.
 - **Connection Pooling**: Configurable connection pool (`MONGODB_MAX_POOL_SIZE=20`, `MONGODB_MIN_POOL_SIZE=0` to scale down sockets when idle and conserve Atlas M0 quotas).
-- **Health Checks**: The bot can run round-trip latency pings (`db_status` command).
-- **Graceful Lifecycle**: Sockets are initialized during `setup_hook` and closed when the bot shuts down.
+- **Health Checks & Reconnection**: Periodic or on-demand health checks (`db_status` command) that automatically restore repositories if the database recovers from an outage.
+- **Graceful Lifecycle**: Sockets are initialized during `setup_hook` and closed when the bot shuts down after waiting for active in-flight commands.
 - **Repositories**: Clean domain-driven repository layer with automated index creation:
   - `GuildSettingsRepository` (unique index on `guild_id`)
   - `BotStatsRepository` (unique index on `command_name`)
@@ -141,6 +144,7 @@ python3 main.py
 | `ping` | Hybrid (`!ping` or `/ping`) | Returns gateway latency to Discord | Everyone |
 | `uptime` | Hybrid (`!uptime` or `/uptime`) | Displays elapsed bot running time | Bot Owner |
 | `link` | Hybrid (`!link` or `/link`) | Generates OAuth2 bot invite link | Bot Owner |
+| `prefix` | Hybrid (`!prefix` or `/prefix`) | View or set custom server prefix | Manage Server / Owner |
 | `db_status` | Hybrid (`!db_status` or `/db_status`) | Displays MongoDB health, latency & top commands | Bot Owner |
 
 ---
@@ -153,4 +157,4 @@ Run the full automated test suite with `pytest`:
 pytest -v
 ```
 
-All 30 unit and integration tests execute offline without requiring active external Discord or MongoDB credentials.
+All 36 unit and integration tests execute offline without requiring active external Discord or MongoDB credentials.

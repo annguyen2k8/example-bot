@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import datetime
 import pathlib
-import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, List, Optional
 
 import discord
 from discord.ext import commands
@@ -17,6 +17,19 @@ from database.repositories.bot_stats import BotStatsRepository
 from database.repositories.guild_settings import GuildSettingsRepository
 
 logger = get_logger("client")
+
+
+async def get_command_prefix(bot: ExampleBot, message: discord.Message) -> List[str]:
+    """Dynamically resolve command prefixes, checking per-guild custom prefix if available."""
+    default_prefixes = list(bot.config.command_prefix)
+    if message.guild is not None and bot.guild_settings is not None:
+        try:
+            custom = await bot.guild_settings.get_prefix(message.guild.id)
+            if custom:
+                return [custom]
+        except Exception as e:
+            logger.warning("Failed to lookup guild prefix; using defaults: %s", e)
+    return default_prefixes
 
 
 class ExampleBot(commands.Bot):
@@ -32,7 +45,7 @@ class ExampleBot(commands.Bot):
         intents = kwargs.pop("intents", discord.Intents.all())
 
         super().__init__(
-            command_prefix=config.command_prefix,
+            command_prefix=get_command_prefix,
             description=config.description,
             intents=intents,
             **kwargs,
@@ -42,31 +55,49 @@ class ExampleBot(commands.Bot):
         self.mongo = mongo_manager
         self.start_time: datetime.datetime = datetime.datetime.now()
 
-        # Repositories (initialized in setup_hook when DB is ready)
+        # Repositories (initialized when DB is ready)
         self.guild_settings: Optional[GuildSettingsRepository] = None
         self.bot_stats: Optional[BotStatsRepository] = None
+
+        # In-flight command tracking for graceful teardown
+        self._active_commands: int = 0
+        self._all_commands_done: asyncio.Event = asyncio.Event()
+        self._all_commands_done.set()
+
+    async def ensure_database_ready(self) -> bool:
+        """Ensure MongoDB connection and repositories are ready, reconnecting if previously degraded."""
+        if self.mongo is None:
+            return False
+
+        if self.mongo.is_connected and self.guild_settings is not None and self.bot_stats is not None:
+            return True
+
+        try:
+            if not self.mongo.is_connected:
+                await self.mongo.connect()
+
+            if self.mongo.db is not None:
+                self.guild_settings = GuildSettingsRepository(self.mongo.db["guild_settings"])
+                self.bot_stats = BotStatsRepository(self.mongo.db["bot_stats"])
+
+                logger.info("Initializing collection indexes...")
+                await self.guild_settings.create_indexes()
+                await self.bot_stats.create_indexes()
+                logger.info("Database repositories ready.")
+                return True
+        except Exception as e:
+            logger.warning("Failed to establish database connection/repositories: %s", e)
+            self.guild_settings = None
+            self.bot_stats = None
+
+        return False
 
     async def setup_hook(self) -> None:
         """Asynchronous initialization hook called before the bot connects to Discord gateway."""
         logger.info("Running setup_hook...")
 
-        # 1. Initialize MongoDB connection & repositories
-        if self.mongo is not None:
-            try:
-                if not self.mongo.is_connected:
-                    await self.mongo.connect()
-
-                if self.mongo.db is not None:
-                    self.guild_settings = GuildSettingsRepository(self.mongo.db["guild_settings"])
-                    self.bot_stats = BotStatsRepository(self.mongo.db["bot_stats"])
-
-                    logger.info("Initializing collection indexes...")
-                    await self.guild_settings.create_indexes()
-                    await self.bot_stats.create_indexes()
-                    logger.info("Database repositories ready.")
-            except Exception as e:
-                logger.error("Failed to initialize database during setup_hook: %s", e)
-                # We continue so bot can still start in degraded/offline mode if desired
+        # 1. Initialize MongoDB connection & repositories (supports degraded mode if unavailable)
+        await self.ensure_database_ready()
 
         # 2. Discover and load extensions (Cogs)
         await self.load_cogs()
@@ -94,13 +125,11 @@ class ExampleBot(commands.Bot):
 
             extension_target: Optional[str] = None
             if item.is_dir():
-                # Directory cog: check for main.py or __init__.py
                 if (item / "main.py").is_file():
                     extension_target = f"cogs.{cog_name}.main"
                 elif (item / "__init__.py").is_file():
                     extension_target = f"cogs.{cog_name}"
             elif item.is_file() and item.suffix == ".py":
-                # Single-file cog
                 extension_target = f"cogs.{item.stem}"
 
             if not extension_target:
@@ -138,14 +167,28 @@ class ExampleBot(commands.Bot):
     async def close(self) -> None:
         """Gracefully shutdown bot services, closing gateway sessions and database connections."""
         logger.info("Bot is shutting down...")
+
+        # 1. Close Discord gateway session so no new commands arrive
         try:
             await super().close()
-        finally:
-            if self.mongo is not None and self.mongo.is_connected:
-                try:
-                    await self.mongo.disconnect()
-                except Exception as e:
-                    logger.error("Error while disconnecting MongoDB: %s", e)
+        except Exception as e:
+            logger.error("Error while closing Discord client session: %s", e)
+
+        # 2. Wait for in-flight commands to finish accessing database
+        if self._active_commands > 0:
+            logger.info("Waiting for %d in-flight command(s) to finish...", self._active_commands)
+            try:
+                await asyncio.wait_for(self._all_commands_done.wait(), timeout=5.0)
+            except asyncio.TimeoutError:
+                logger.warning("Grace timeout reached; proceeding with database shutdown.")
+
+        # 3. Disconnect MongoDB connection pool
+        if self.mongo is not None and self.mongo.is_connected:
+            try:
+                await self.mongo.disconnect()
+            except Exception as e:
+                logger.error("Error while disconnecting MongoDB: %s", e)
+
         logger.info("Bot shutdown completed.")
 
     async def on_ready(self) -> None:
@@ -160,13 +203,28 @@ class ExampleBot(commands.Bot):
             round(self.latency * 1000),
         )
 
+    async def on_command(self, ctx: commands.Context) -> None:
+        """Track beginning of command execution."""
+        self._active_commands += 1
+        self._all_commands_done.clear()
+
+    async def _on_command_finished(self) -> None:
+        """Track completion of command execution."""
+        if self._active_commands > 0:
+            self._active_commands -= 1
+            if self._active_commands == 0:
+                self._all_commands_done.set()
+
     async def on_command_completion(self, ctx: commands.Context) -> None:
         """Track command metrics upon successful completion."""
-        if self.bot_stats is not None and ctx.command is not None:
-            try:
-                await self.bot_stats.record_command_invocation(ctx.command.qualified_name)
-            except Exception as e:
-                logger.warning("Failed to record command usage for %s: %s", ctx.command.qualified_name, e)
+        try:
+            if self.bot_stats is not None and ctx.command is not None:
+                try:
+                    await self.bot_stats.record_command_invocation(ctx.command.qualified_name)
+                except Exception as e:
+                    logger.warning("Failed to record command usage for %s: %s", ctx.command.qualified_name, e)
+        finally:
+            await self._on_command_finished()
 
     async def on_command_error(
         self,
@@ -174,28 +232,30 @@ class ExampleBot(commands.Bot):
         error: commands.CommandError,
     ) -> None:
         """Global error handling for command execution."""
-        # Unwrap CommandInvokeError
-        if isinstance(error, commands.CommandInvokeError):
-            error = error.original  # type: ignore[assignment]
+        try:
+            if isinstance(error, commands.CommandInvokeError):
+                error = error.original  # type: ignore[assignment]
 
-        if isinstance(error, commands.MissingPermissions):
-            await ctx.reply("You do not have the required permissions to use this command.")
-            return
+            if isinstance(error, commands.MissingPermissions):
+                await ctx.reply("You do not have the required permissions to use this command.")
+                return
 
-        if isinstance(error, commands.NotOwner):
-            await ctx.reply("This command is restricted to the bot owner.")
-            return
+            if isinstance(error, commands.NotOwner):
+                await ctx.reply("This command is restricted to the bot owner.")
+                return
 
-        if isinstance(error, commands.NoPrivateMessage):
-            await ctx.reply("This command cannot be used in private messages.")
-            return
+            if isinstance(error, commands.NoPrivateMessage):
+                await ctx.reply("This command cannot be used in private messages.")
+                return
 
-        if isinstance(error, commands.CommandNotFound):
-            return  # Silently ignore unknown prefix commands
+            if isinstance(error, commands.CommandNotFound):
+                return
 
-        logger.error(
-            "Unhandled exception in command '%s': %s",
-            ctx.command.qualified_name if ctx.command else "Unknown",
-            error,
-            exc_info=error,
-        )
+            logger.error(
+                "Unhandled exception in command '%s': %s",
+                ctx.command.qualified_name if ctx.command else "Unknown",
+                error,
+                exc_info=error,
+            )
+        finally:
+            await self._on_command_finished()
