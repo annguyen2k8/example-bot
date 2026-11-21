@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import datetime
 import pathlib
-from typing import Any, Coroutine, List, Optional, Set, TypeVar
+from typing import TYPE_CHECKING, Any, Coroutine, List, Optional, Set, TypeVar
 
 import discord
 from discord import app_commands
@@ -13,9 +13,11 @@ from discord.ext import commands
 
 from bot.config import BotConfig
 from bot.logging import get_logger
-from database.connection import MongoManager
 from database.repositories.bot_stats import BotStatsRepository
 from database.repositories.guild_settings import GuildSettingsRepository
+
+if TYPE_CHECKING:
+    from database.connection import MongoManager
 
 logger = get_logger("client")
 T = TypeVar("T")
@@ -149,8 +151,12 @@ class ExampleBot(commands.Bot):
         """Dynamically load extensions from the cogs directory safely."""
         cogs_path = pathlib.Path(cogs_dir)
         if not cogs_path.is_dir():
-            logger.warning("Cogs directory '%s' not found. Skipping cog loading.", cogs_dir)
-            return
+            project_cogs = pathlib.Path(__file__).resolve().parent.parent / cogs_dir
+            if project_cogs.is_dir():
+                cogs_path = project_cogs
+            else:
+                logger.warning("Cogs directory '%s' not found. Skipping cog loading.", cogs_dir)
+                return
 
         loaded_cogs: List[str] = []
         failed_cogs: List[str] = []
@@ -174,6 +180,10 @@ class ExampleBot(commands.Bot):
             if not extension_target:
                 continue
 
+            if extension_target in self.extensions:
+                logger.debug("Extension '%s' already loaded. Skipping.", extension_target)
+                continue
+
             try:
                 await self.load_extension(extension_target)
                 loaded_cogs.append(cog_name)
@@ -190,18 +200,60 @@ class ExampleBot(commands.Bot):
             ", ".join(failed_cogs) or "none",
         )
 
-    async def sync_commands(self) -> None:
+    async def sync_commands(
+        self,
+        guild: Optional[discord.abc.Snowflake] = None,
+    ) -> List[app_commands.AppCommand]:
         """Synchronize hybrid and slash commands with Discord."""
+        # Ensure cogs and commands are discovered and loaded before syncing
+        if not self.cogs:
+            logger.info("No cogs loaded yet; loading cogs before syncing command tree...")
+            await self.load_cogs()
+
+        target_desc = f"guild {guild.id}" if guild is not None else "global scope"
+        tree_commands = self.tree.get_commands(guild=guild)
+
+        if not tree_commands:
+            logger.warning(
+                "No application commands registered in CommandTree for %s. Skipping tree.sync() to prevent clearing commands.",
+                target_desc,
+            )
+            return []
+
         try:
-            logger.info("Syncing application command tree...")
-            synced = await self.tree.sync()
             logger.info(
-                "Command sync complete: %d application commands synced, %d prefix commands registered",
+                "Syncing %d application command(s) (%s) to %s...",
+                len(tree_commands),
+                ", ".join(cmd.name for cmd in tree_commands),
+                target_desc,
+            )
+            synced = await self.tree.sync(guild=guild)
+            logger.info(
+                "Command sync complete for %s: %d application commands synced, %d prefix commands registered",
+                target_desc,
                 len(synced),
                 len(self.commands),
             )
+            return synced
+        except discord.Forbidden as error:
+            logger.error(
+                "Forbidden error while syncing application commands to %s: Bot lacks 'applications.commands' scope or authorization: %s",
+                target_desc,
+                error,
+            )
+            return []
+        except discord.HTTPException as error:
+            logger.error(
+                "HTTPException while syncing application commands to %s (status %s): %s",
+                target_desc,
+                error.status,
+                error,
+                exc_info=True,
+            )
+            return []
         except Exception as error:
-            logger.error("Failed to sync application commands: %s", error, exc_info=True)
+            logger.error("Failed to sync application commands to %s: %s", target_desc, error, exc_info=True)
+            return []
 
     async def close(self) -> None:
         """Gracefully shutdown bot services, closing gateway sessions and database connections."""

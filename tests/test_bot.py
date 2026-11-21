@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import pathlib
 from unittest.mock import AsyncMock, MagicMock, patch
+import discord
 import pytest
 from pymongo.errors import ConnectionFailure
 
@@ -268,3 +269,81 @@ async def test_load_cogs_safe_and_resilient(tmp_path: pathlib.Path, test_config:
     assert "cogs.good.main" in loaded_extensions
     assert "cogs.single" in loaded_extensions
     assert not any("__pycache__" in ext for ext in loaded_extensions)
+
+
+@pytest.mark.asyncio
+async def test_sync_commands_loads_cogs_first_if_empty(test_config: BotConfig) -> None:
+    """Ensure sync_commands triggers load_cogs if cogs are not yet loaded."""
+    bot = ExampleBot(config=test_config)
+    mock_app_cmd = MagicMock(spec=discord.app_commands.AppCommand)
+    mock_app_cmd.name = "test_cmd"
+
+    async def mock_load() -> None:
+        # Simulate loading by injecting a dummy command into tree and cog dict
+        bot._BotBase__cogs = {"dummy": MagicMock()}  # type: ignore[attr-defined]
+        bot.tree._get_all_commands = MagicMock(return_value=[mock_app_cmd])  # type: ignore[attr-defined]
+
+    with patch.object(bot, "load_cogs", side_effect=mock_load) as mock_load_cogs, \
+         patch.object(bot.tree, "get_commands", return_value=[mock_app_cmd]), \
+         patch.object(bot.tree, "sync", new_callable=AsyncMock) as mock_sync:
+        mock_sync.return_value = [mock_app_cmd]
+        res = await bot.sync_commands()
+
+        mock_load_cogs.assert_called_once()
+        mock_sync.assert_called_once_with(guild=None)
+        assert res == [mock_app_cmd]
+
+
+@pytest.mark.asyncio
+async def test_sync_commands_skips_when_no_commands_in_tree(test_config: BotConfig) -> None:
+    """Ensure sync_commands skips tree.sync when tree is empty to prevent clearing Discord commands."""
+    bot = ExampleBot(config=test_config)
+    bot._BotBase__cogs = {"dummy": MagicMock()}  # type: ignore[attr-defined]
+
+    with patch.object(bot.tree, "get_commands", return_value=[]), \
+         patch.object(bot.tree, "sync", new_callable=AsyncMock) as mock_sync:
+        res = await bot.sync_commands()
+
+        mock_sync.assert_not_called()
+        assert res == []
+
+
+@pytest.mark.asyncio
+async def test_sync_commands_error_handling(test_config: BotConfig) -> None:
+    """Ensure sync_commands catches Forbidden and HTTPException without crashing."""
+    bot = ExampleBot(config=test_config)
+    bot._BotBase__cogs = {"dummy": MagicMock()}  # type: ignore[attr-defined]
+    mock_cmd = MagicMock()
+    mock_cmd.name = "cmd"
+
+    # Test Forbidden error
+    mock_resp = MagicMock()
+    mock_resp.status = 403
+    forbidden_err = discord.Forbidden(mock_resp, "Missing access")
+
+    with patch.object(bot.tree, "get_commands", return_value=[mock_cmd]), \
+         patch.object(bot.tree, "sync", new_callable=AsyncMock) as mock_sync:
+        mock_sync.side_effect = forbidden_err
+        res = await bot.sync_commands()
+        assert res == []
+
+    # Test Generic Exception error
+    with patch.object(bot.tree, "get_commands", return_value=[mock_cmd]), \
+         patch.object(bot.tree, "sync", new_callable=AsyncMock) as mock_sync:
+        mock_sync.side_effect = RuntimeError("Network error")
+        res = await bot.sync_commands()
+        assert res == []
+
+
+@pytest.mark.asyncio
+async def test_setup_hook_syncs_when_configured(test_config: BotConfig) -> None:
+    """Ensure setup_hook invokes sync_commands when sync_commands_on_startup is True."""
+    test_config.sync_commands_on_startup = True
+    bot = ExampleBot(config=test_config)
+
+    with patch.object(bot, "ensure_database_ready", new_callable=AsyncMock), \
+         patch.object(bot, "load_cogs", new_callable=AsyncMock) as mock_load, \
+         patch.object(bot, "sync_commands", new_callable=AsyncMock) as mock_sync:
+        await bot.setup_hook()
+        mock_load.assert_called_once()
+        mock_sync.assert_called_once()

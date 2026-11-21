@@ -10,6 +10,8 @@ import asyncio
 import sys
 from typing import Optional, Union
 
+import discord
+
 from bot.client import ExampleBot
 from bot.config import BotConfig
 from bot.logging import get_logger, setup_logging
@@ -22,7 +24,7 @@ async def async_main(config: Optional[BotConfig] = None) -> None:
     """Asynchronous entry point orchestrating bot and database lifecycle."""
     if config is None:
         try:
-            config = BotConfig.load()
+            config = BotConfig.load(require_token=True)
         except ValueError as e:
             logger.critical("Configuration error: %s", e)
             sys.exit(1)
@@ -58,21 +60,38 @@ async def async_main(config: Optional[BotConfig] = None) -> None:
         async with bot:
             logger.info("Starting bot gateway connection...")
             await bot.start(config.token)
+    except discord.LoginFailure as e:
+        logger.critical("Authentication failure: Invalid Discord credentials provided (%s).", e)
+        sys.exit(1)
+    except (discord.HTTPException, discord.GatewayNotFound, discord.ConnectionClosed) as e:
+        logger.critical("Discord API/Gateway connection failure: %s", e, exc_info=True)
+        sys.exit(1)
     except (KeyboardInterrupt, asyncio.CancelledError):
         logger.info("Bot execution stopped.")
     except Exception as e:
         logger.critical("Fatal error encountered during bot runtime: %s", e, exc_info=True)
         sys.exit(1)
+    finally:
+        if mongo_manager is not None and mongo_manager.is_connected:
+            logger.info("Ensuring MongoDB manager shutdown...")
+            try:
+                await mongo_manager.disconnect()
+            except Exception as e:
+                logger.error("Error during MongoDB manager shutdown: %s", e)
 
 
 def start_bot(config_source: Optional[Union[BotConfig, str]] = None) -> None:
     """Synchronous launcher provided for entrypoint invocation."""
-    if isinstance(config_source, BotConfig):
-        cfg = config_source
-    elif isinstance(config_source, str):
-        cfg = BotConfig.load(config_source)
-    else:
-        cfg = BotConfig.load()
+    try:
+        if isinstance(config_source, BotConfig):
+            cfg = config_source
+        elif isinstance(config_source, str):
+            cfg = BotConfig.load(config_source, require_token=True)
+        else:
+            cfg = BotConfig.load(require_token=True)
+    except ValueError as e:
+        logger.critical("Configuration error: %s", e)
+        sys.exit(1)
 
     try:
         asyncio.run(async_main(cfg))

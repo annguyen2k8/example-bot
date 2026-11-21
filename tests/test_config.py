@@ -5,7 +5,7 @@ from __future__ import annotations
 import pathlib
 import pytest
 
-from bot.config import BotConfig, redact_token, redact_uri
+from bot.config import BotConfig, clean_token, redact_token, redact_uri
 
 
 def test_default_config() -> None:
@@ -155,3 +155,132 @@ def test_secret_redaction() -> None:
     assert "mypassword" not in repr_str
     assert "supe...oken" in repr_str
     assert "mongodb://admin:***@localhost:27017" in repr_str
+
+
+def test_clean_token() -> None:
+    """Test token cleaning: whitespace, quotes, and prefix stripping."""
+    assert clean_token("  my_token  ") == "my_token"
+    assert clean_token("\tmy_token\n\r") == "my_token"
+    assert clean_token('"my_token"') == "my_token"
+    assert clean_token("'my_token'") == "my_token"
+    assert clean_token('"  my_token  "') == "my_token"
+    assert clean_token("Bot my_token") == "my_token"
+    assert clean_token("bot my_token") == "my_token"
+    assert clean_token("Bearer my_token") == "my_token"
+    assert clean_token("bearer my_token") == "my_token"
+    assert clean_token('  "Bot my_token"  ') == "my_token"
+    assert clean_token("Bot Bot my_token") == "my_token"
+    assert clean_token('Bearer "Bot my_token"') == "my_token"
+    assert clean_token("Bot 'Bot my_token'") == "my_token"
+    assert clean_token("   ") == ""
+    assert clean_token("") == ""
+    assert clean_token(None) == ""
+
+
+def test_bot_config_post_init() -> None:
+    """Ensure BotConfig sanitizes values in __post_init__."""
+    config = BotConfig(
+        token="  Bot test-token-123  ",
+        mongodb_uri="  mongodb://localhost:27017  ",
+        mongodb_database="  my_db  ",
+        logs_dir="  my_logs  ",
+        log_level="  debug  ",
+        description="  Bot Description  ",
+    )
+    assert config.token == "test-token-123"
+    assert config.mongodb_uri == "mongodb://localhost:27017"
+    assert config.mongodb_database == "my_db"
+    assert config.logs_dir == "my_logs"
+    assert config.log_level == "DEBUG"
+    assert config.description == "Bot Description"
+
+
+def test_validation_whitespace_and_placeholder_tokens() -> None:
+    """Test that empty or placeholder tokens fail early."""
+    with pytest.raises(ValueError, match="DISCORD_TOKEN is missing or set to placeholder"):
+        BotConfig(token="   ").validate(require_token=True)
+
+    with pytest.raises(ValueError, match="DISCORD_TOKEN is missing or set to placeholder"):
+        BotConfig(token="your_discord_bot_token_here").validate(require_token=True)
+
+    with pytest.raises(ValueError, match="DISCORD_TOKEN is missing or set to placeholder"):
+        BotConfig(token="change_me").validate(require_token=True)
+
+
+def test_validation_malformed_token_whitespace() -> None:
+    """Ensure tokens containing internal whitespace are rejected."""
+    with pytest.raises(ValueError, match="token cannot contain whitespace"):
+        BotConfig(token="token with spaces").validate(require_token=True)
+
+
+def test_validation_malformed_mongodb_uri() -> None:
+    """Ensure invalid MongoDB URI schemes are rejected."""
+    with pytest.raises(ValueError, match="Invalid MONGODB_URI scheme"):
+        BotConfig(mongodb_uri="http://localhost:27017").validate()
+
+
+def test_validation_malformed_embed_color() -> None:
+    """Ensure out-of-range embed colors are rejected."""
+    with pytest.raises(ValueError, match="EMBED_COLOR must be an integer between"):
+        BotConfig(embed_color=-1).validate()
+
+    with pytest.raises(ValueError, match="EMBED_COLOR must be an integer between"):
+        BotConfig(embed_color=0x1000000).validate()
+
+
+def test_load_with_bot_prefix(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """Ensure tokens prefixed with 'Bot ' or quotes in .env are cleaned upon loading."""
+    env_file = tmp_path / ".env"
+    env_file.write_text('DISCORD_TOKEN="Bot my-secret-token"\n', encoding="utf-8")
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+
+    config = BotConfig.load(env_path=env_file)
+    assert config.token == "my-secret-token"
+
+
+def test_load_token_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure token alias environment variables are recognized."""
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    monkeypatch.setenv("DISCORD_BOT_TOKEN", "alias-token-1")
+    config1 = BotConfig.load(env_path=None)
+    assert config1.token == "alias-token-1"
+
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.setenv("BOT_TOKEN", "alias-token-2")
+    config2 = BotConfig.load(env_path=None)
+    assert config2.token == "alias-token-2"
+
+
+def test_load_fallback_when_os_env_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path) -> None:
+    """Ensure empty OS env var falls back to .env file value."""
+    env_file = tmp_path / ".env"
+    env_file.write_text("DISCORD_TOKEN=file-fallback-token\n", encoding="utf-8")
+
+    monkeypatch.setenv("DISCORD_TOKEN", "   ")
+    config = BotConfig.load(env_path=env_file)
+    assert config.token == "file-fallback-token"
+
+
+def test_load_fails_early_when_require_token_true(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure BotConfig.load with require_token=True raises ValueError on missing token."""
+    monkeypatch.delenv("DISCORD_TOKEN", raising=False)
+    monkeypatch.delenv("DISCORD_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+
+    with pytest.raises(ValueError, match="DISCORD_TOKEN is missing or set to placeholder"):
+        BotConfig.load(env_path=None, require_token=True)
+
+
+def test_load_whitespace_padded_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure whitespace-padded env vars are stripped cleanly."""
+    monkeypatch.setenv("DISCORD_TOKEN", "   token_padded   ")
+    monkeypatch.setenv("MONGODB_URI", "   mongodb://localhost:27017   ")
+    monkeypatch.setenv("MONGODB_DATABASE", "   custom_db   ")
+    monkeypatch.setenv("LOG_LEVEL", "   warning   ")
+
+    config = BotConfig.load(env_path=None)
+    assert config.token == "token_padded"
+    assert config.mongodb_uri == "mongodb://localhost:27017"
+    assert config.mongodb_database == "custom_db"
+    assert config.log_level == "WARNING"
+
