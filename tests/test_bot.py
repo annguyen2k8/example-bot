@@ -1,4 +1,4 @@
-"""Tests for ExampleBot initialization, lifecycle, prefix resolution, and cog loader."""
+"""Tests for BotBase initialization, lifecycle, prefix resolution, and cog loader."""
 
 from __future__ import annotations
 
@@ -9,7 +9,7 @@ import discord
 import pytest
 from pymongo.errors import ConnectionFailure
 
-from bot.client import AppCommandTree, ExampleBot, get_command_prefix
+from bot.client import AppCommandTree, BotBase, get_command_prefix
 from bot.config import BotConfig
 from database.connection import MongoManager
 
@@ -26,7 +26,7 @@ def test_config() -> BotConfig:
 
 @pytest.mark.asyncio
 async def test_bot_initialization(test_config: BotConfig) -> None:
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
     assert bot.config == test_config
     assert bot.description == "Test Bot"
     assert callable(bot.command_prefix)
@@ -35,7 +35,7 @@ async def test_bot_initialization(test_config: BotConfig) -> None:
 
 @pytest.mark.asyncio
 async def test_dynamic_prefix_resolution(test_config: BotConfig) -> None:
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
 
     # 1. Message without guild (DM)
     dm_msg = MagicMock()
@@ -69,7 +69,7 @@ async def test_bot_lifecycle_and_close(test_config: BotConfig) -> None:
     mock_mongo.is_connected = True
     mock_mongo.disconnect = AsyncMock()
 
-    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+    bot = BotBase(config=test_config, mongo_manager=mock_mongo)
 
     with patch.object(bot, "is_closed", return_value=False):
         with patch("discord.ext.commands.Bot.close", new_callable=AsyncMock) as mock_super_close:
@@ -85,7 +85,7 @@ async def test_shutdown_waits_for_active_commands(test_config: BotConfig) -> Non
     mock_mongo.is_connected = True
     mock_mongo.disconnect = AsyncMock()
 
-    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+    bot = BotBase(config=test_config, mongo_manager=mock_mongo)
 
     mock_ctx = MagicMock()
     mock_ctx.command = MagicMock()
@@ -128,7 +128,7 @@ async def test_tracked_background_tasks_graceful_shutdown(test_config: BotConfig
     mock_mongo.is_connected = True
     mock_mongo.disconnect = AsyncMock()
 
-    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+    bot = BotBase(config=test_config, mongo_manager=mock_mongo)
 
     task_cancelled = False
 
@@ -158,7 +158,7 @@ async def test_tracked_background_tasks_graceful_shutdown(test_config: BotConfig
 @pytest.mark.asyncio
 async def test_app_command_tree_lifecycle_tracking(test_config: BotConfig) -> None:
     """Ensure AppCommandTree tracks slash command invocations in _active_commands."""
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
     tree = bot.tree
 
     assert isinstance(tree, AppCommandTree)
@@ -198,7 +198,7 @@ async def test_concurrent_database_reconnection(test_config: BotConfig) -> None:
 
     mock_mongo.connect = AsyncMock(side_effect=delayed_connect)
 
-    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+    bot = BotBase(config=test_config, mongo_manager=mock_mongo)
 
     with patch("bot.client.GuildSettingsRepository") as mock_guild_repo, \
          patch("bot.client.BotStatsRepository") as mock_stats_repo:
@@ -227,7 +227,7 @@ async def test_setup_hook_handles_db_failure(test_config: BotConfig) -> None:
     mock_mongo.is_connected = False
     mock_mongo.connect = AsyncMock(side_effect=ConnectionFailure("Database down"))
 
-    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+    bot = BotBase(config=test_config, mongo_manager=mock_mongo)
 
     with patch.object(bot, "load_cogs", new_callable=AsyncMock) as mock_load_cogs:
         await bot.setup_hook()
@@ -255,7 +255,7 @@ async def test_load_cogs_safe_and_resilient(tmp_path: pathlib.Path, test_config:
     # Single-file cog
     (cogs_dir / "single.py").write_text("# single", encoding="utf-8")
 
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
     loaded_extensions = []
 
     async def mock_load_extension(ext: str) -> None:
@@ -274,7 +274,7 @@ async def test_load_cogs_safe_and_resilient(tmp_path: pathlib.Path, test_config:
 @pytest.mark.asyncio
 async def test_sync_commands_loads_cogs_first_if_empty(test_config: BotConfig) -> None:
     """Ensure sync_commands triggers load_cogs if cogs are not yet loaded."""
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
     mock_app_cmd = MagicMock(spec=discord.app_commands.AppCommand)
     mock_app_cmd.name = "test_cmd"
 
@@ -297,7 +297,7 @@ async def test_sync_commands_loads_cogs_first_if_empty(test_config: BotConfig) -
 @pytest.mark.asyncio
 async def test_sync_commands_skips_when_no_commands_in_tree(test_config: BotConfig) -> None:
     """Ensure sync_commands skips tree.sync when tree is empty to prevent clearing Discord commands."""
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
     bot._BotBase__cogs = {"dummy": MagicMock()}  # type: ignore[attr-defined]
 
     with patch.object(bot.tree, "get_commands", return_value=[]), \
@@ -311,7 +311,7 @@ async def test_sync_commands_skips_when_no_commands_in_tree(test_config: BotConf
 @pytest.mark.asyncio
 async def test_sync_commands_error_handling(test_config: BotConfig) -> None:
     """Ensure sync_commands catches Forbidden and HTTPException without crashing."""
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
     bot._BotBase__cogs = {"dummy": MagicMock()}  # type: ignore[attr-defined]
     mock_cmd = MagicMock()
     mock_cmd.name = "cmd"
@@ -339,7 +339,7 @@ async def test_sync_commands_error_handling(test_config: BotConfig) -> None:
 async def test_setup_hook_syncs_when_configured(test_config: BotConfig) -> None:
     """Ensure setup_hook invokes sync_commands when sync_commands_on_startup is True."""
     test_config.sync_commands_on_startup = True
-    bot = ExampleBot(config=test_config)
+    bot = BotBase(config=test_config)
 
     with patch.object(bot, "ensure_database_ready", new_callable=AsyncMock), \
          patch.object(bot, "load_cogs", new_callable=AsyncMock) as mock_load, \

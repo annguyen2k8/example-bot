@@ -1,4 +1,4 @@
-"""Tests for centralized logging configuration and discord.py logging integration in ExampleBot."""
+"""Tests for centralized logging configuration and discord.py logging integration in BotBase."""
 
 from __future__ import annotations
 

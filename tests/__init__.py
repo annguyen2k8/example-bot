@@ -1,1 +1,1 @@
-"""Test package for ExampleBot."""
+"""Test package for BotBase."""

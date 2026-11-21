@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import discord
 import pytest
 
-from bot.client import ExampleBot
+from bot.client import BotBase
 from bot.config import BotConfig
 from database.connection import MongoManager
 from main import async_main, start_bot
@@ -28,7 +28,7 @@ async def test_async_main_login_failure_distinguished() -> None:
     """Ensure async_main specifically catches LoginFailure and exits."""
     config = BotConfig(token="valid-token-format")
 
-    with patch.object(ExampleBot, "start", new_callable=AsyncMock) as mock_start, \
+    with patch.object(BotBase, "start", new_callable=AsyncMock) as mock_start, \
          patch("main.logger") as mock_logger:
         mock_start.side_effect = discord.LoginFailure("Improper token has been passed.")
 
@@ -47,7 +47,7 @@ async def test_async_main_connection_failure() -> None:
     """Ensure async_main distinguishes connection/gateway failures."""
     config = BotConfig(token="valid-token-format")
 
-    with patch.object(ExampleBot, "start", new_callable=AsyncMock) as mock_start, \
+    with patch.object(BotBase, "start", new_callable=AsyncMock) as mock_start, \
          patch("main.logger") as mock_logger:
         mock_start.side_effect = discord.GatewayNotFound()
 
@@ -64,7 +64,7 @@ async def test_async_main_general_exception() -> None:
     """Ensure async_main logs general runtime exceptions."""
     config = BotConfig(token="valid-token-format")
 
-    with patch.object(ExampleBot, "start", new_callable=AsyncMock) as mock_start, \
+    with patch.object(BotBase, "start", new_callable=AsyncMock) as mock_start, \
          patch("main.logger") as mock_logger:
         mock_start.side_effect = RuntimeError("Something unexpected")
 
@@ -93,7 +93,7 @@ async def test_async_main_preserves_mongodb_lifecycle_on_failure() -> None:
     mock_mongo.disconnect = AsyncMock(side_effect=mock_disconnect)
 
     with patch("main.MongoManager", return_value=mock_mongo), \
-         patch.object(ExampleBot, "start", new_callable=AsyncMock) as mock_start:
+         patch.object(BotBase, "start", new_callable=AsyncMock) as mock_start:
         mock_start.side_effect = discord.LoginFailure("Improper token has been passed.")
 
         with pytest.raises(SystemExit):

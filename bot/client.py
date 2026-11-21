@@ -27,7 +27,7 @@ class AppCommandTree(app_commands.CommandTree):
     """Custom command tree tracking application and slash command lifecycles."""
 
     async def _call(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
-        client: ExampleBot = self.client  # type: ignore[assignment]
+        client: BotBase = self.client  # type: ignore[assignment]
         if hasattr(client, "_on_command_started"):
             client._on_command_started()
         try:
@@ -37,7 +37,7 @@ class AppCommandTree(app_commands.CommandTree):
                 await client._on_command_finished()
 
 
-async def get_command_prefix(bot: ExampleBot, message: discord.Message) -> List[str]:
+async def get_command_prefix(bot: BotBase, message: discord.Message) -> List[str]:
     """Dynamically resolve command prefixes, checking per-guild custom prefix if available."""
     default_prefixes = list(bot.config.command_prefix)
     if message.guild is not None and bot.guild_settings is not None:
@@ -50,7 +50,7 @@ async def get_command_prefix(bot: ExampleBot, message: discord.Message) -> List[
     return default_prefixes
 
 
-class ExampleBot(commands.Bot):
+class BotBase(commands.Bot):
     """Custom Discord bot supporting asynchronous lifecycle hooks, Mongo repositories, and dynamic cogs."""
 
     def __init__(

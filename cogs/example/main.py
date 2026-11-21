@@ -13,7 +13,7 @@ from bot.logging import get_logger
 from utils.formatting import bold, format_time, inline
 
 if TYPE_CHECKING:
-    from bot.client import ExampleBot
+    from bot.client import BotBase
 
 logger = get_logger("cogs.example")
 
@@ -21,8 +21,8 @@ logger = get_logger("cogs.example")
 class ExampleCog(commands.Cog, name="Example"):
     """Core informational and diagnostic commands."""
 
-    def __init__(self, bot: ExampleBot) -> None:
-        self.bot: ExampleBot = bot
+    def __init__(self, bot: BotBase) -> None:
+        self.bot: BotBase = bot
 
     def get_uptime_seconds(self) -> float:
         """Calculate the total seconds since bot startup."""
@@ -150,6 +150,6 @@ class ExampleCog(commands.Cog, name="Example"):
             await ctx.reply("Failed to update prefix due to a database error. Please try again later.")
 
 
-async def setup(bot: ExampleBot) -> None:
+async def setup(bot: BotBase) -> None:
     """Extension entrypoint adding ExampleCog to the bot."""
     await bot.add_cog(ExampleCog(bot))

@@ -1,4 +1,4 @@
-"""Application entry point for ExampleBot.
+"""Application entry point for BotBase.
 
 Handles environment variable configuration loading, logging initialization,
 database lifecycle, and Discord bot bootstrap.
@@ -12,7 +12,7 @@ from typing import Optional, Union
 
 import discord
 
-from bot.client import ExampleBot
+from bot.client import BotBase
 from bot.config import BotConfig
 from bot.logging import get_logger, setup_logging
 from database.connection import MongoManager
@@ -54,7 +54,7 @@ async def async_main(config: Optional[BotConfig] = None) -> None:
             connect_timeout_ms=config.mongodb_timeout_ms,
         )
 
-    bot = ExampleBot(config=config, mongo_manager=mongo_manager)
+    bot = BotBase(config=config, mongo_manager=mongo_manager)
 
     try:
         async with bot:

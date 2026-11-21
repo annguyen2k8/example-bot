@@ -1,4 +1,4 @@
-"""Centralized environment variable configuration management for ExampleBot.
+"""Centralized environment variable configuration management for BotBase.
 
 Supports injected operating system environment variables for production environments
 and local .env file loading via python-dotenv for development.

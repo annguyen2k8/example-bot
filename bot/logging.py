@@ -1,4 +1,4 @@
-"""Centralized logging configuration for ExampleBot."""
+"""Centralized logging configuration for BotBase."""
 
 from __future__ import annotations
 
