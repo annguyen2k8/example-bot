@@ -40,7 +40,6 @@ def setup_logging(
     root_logger = logging.getLogger()
 
     # 1. Clean previous example-bot managed handlers to avoid duplicate log entries
-    # Carefully avoid removing indiscriminately any handlers managed by other components
     for handler in list(root_logger.handlers):
         if getattr(handler, "_example_bot_managed", False) or handler in (
             _managed_terminal_handler,
@@ -64,7 +63,7 @@ def setup_logging(
                     handler.close()
                 except Exception:
                     pass
-            pkg_logger.removeHandler(handler)
+                pkg_logger.removeHandler(handler)
     pkg_logger.propagate = True
     pkg_logger.setLevel(numeric_level)
 
@@ -73,6 +72,7 @@ def setup_logging(
     terminal_handler._example_bot_managed = True  # type: ignore[attr-defined]
     discord.utils.setup_logging(
         handler=terminal_handler,
+        formatter=discord.utils._ColourFormatter(),
         level=numeric_level,
         root=True,
     )

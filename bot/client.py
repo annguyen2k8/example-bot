@@ -62,12 +62,14 @@ class BotBase(commands.Bot):
         """Initialize the bot with configuration and optional database manager."""
         intents = kwargs.pop("intents", discord.Intents.all())
         tree_cls = kwargs.pop("tree_cls", AppCommandTree)
+        log_handler = kwargs.pop("log_handler", None)
 
         super().__init__(
             command_prefix=get_command_prefix,
             description=config.description,
             intents=intents,
             tree_cls=tree_cls,
+            log_handler=log_handler,
             **kwargs,
         )
 

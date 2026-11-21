@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import logging.handlers
 import pathlib
+import sys
 from unittest.mock import patch
 import discord.utils
 import pytest
@@ -114,6 +115,109 @@ def test_file_logging_is_plain_text_without_ansi(tmp_path: pathlib.Path) -> None
     # Assert no ANSI escape codes exist in file
     assert "\x1b[" not in content
     assert "\x1b" not in content
+
+
+def test_log_records_captured_across_namespaces(tmp_path: pathlib.Path) -> None:
+    """Ensure log records from example_bot and discord are all captured in file."""
+    setup_logging(logs_dir=str(tmp_path), log_level="DEBUG")
+
+    get_logger("submodule").info("ExampleBot submodule event")
+    logging.getLogger("discord.gateway").warning("Discord gateway test event")
+
+    for h in logging.getLogger().handlers:
+        h.flush()
+
+    log_files = list(tmp_path.glob("*.log"))
+    assert len(log_files) == 1
+    content = log_files[0].read_text(encoding="utf-8")
+
+    assert "ExampleBot submodule event" in content
+    assert "Discord gateway test event" in content
+
+
+def test_rotating_file_handler_configuration_and_rollover(tmp_path: pathlib.Path) -> None:
+    """Ensure RotatingFileHandler is configured with maxBytes=10MB and backupCount=5, and rotates."""
+    setup_logging(logs_dir=str(tmp_path), log_level="INFO")
+
+    root = logging.getLogger()
+    file_handlers = [h for h in root.handlers if isinstance(h, logging.handlers.RotatingFileHandler)]
+    assert len(file_handlers) == 1
+    rfh = file_handlers[0]
+
+    assert rfh.maxBytes == 10 * 1024 * 1024
+    assert rfh.backupCount == 5
+
+    # Verify rollover functionality with a small-boundary RotatingFileHandler
+    test_log_file = tmp_path / "rollover_test.log"
+    small_rfh = logging.handlers.RotatingFileHandler(
+        str(test_log_file),
+        maxBytes=150,
+        backupCount=3,
+        encoding="utf-8",
+    )
+    test_logger = logging.getLogger("test_rollover")
+    test_logger.addHandler(small_rfh)
+    test_logger.propagate = False
+
+    try:
+        for i in range(15):
+            test_logger.info("Message %02d padding bytes to trigger log file rotation...", i)
+        small_rfh.flush()
+        small_rfh.close()
+
+        created_files = list(tmp_path.glob("rollover_test.log*"))
+        assert len(created_files) > 1
+        assert (tmp_path / "rollover_test.log.1").exists()
+    finally:
+        test_logger.removeHandler(small_rfh)
+
+
+def test_console_formatter_has_color(tmp_path: pathlib.Path) -> None:
+    """Ensure the console handler uses discord.py's native _ColourFormatter and generates ANSI codes."""
+    setup_logging(logs_dir=str(tmp_path), log_level="INFO")
+
+    root = logging.getLogger()
+    stream_handlers = [
+        h
+        for h in root.handlers
+        if getattr(h, "_example_bot_managed", False)
+        and isinstance(h, logging.StreamHandler)
+        and not isinstance(h, logging.FileHandler)
+    ]
+    assert len(stream_handlers) == 1
+
+    formatter = stream_handlers[0].formatter
+    assert isinstance(formatter, discord.utils._ColourFormatter)
+
+    record = logging.LogRecord(
+        name="example_bot.test",
+        level=logging.INFO,
+        pathname=__file__,
+        lineno=1,
+        msg="Color verification message",
+        args=(),
+        exc_info=None,
+    )
+    formatted = formatter.format(record)
+    assert "\x1b[" in formatted
+    assert "Color verification message" in formatted
+
+
+def test_setup_logging_avoids_duplicate_log_records(tmp_path: pathlib.Path) -> None:
+    """Ensure calling setup_logging multiple times does not write duplicate lines per event."""
+    setup_logging(logs_dir=str(tmp_path), log_level="INFO")
+    setup_logging(logs_dir=str(tmp_path), log_level="INFO")
+
+    logger = get_logger("dup_test")
+    logger.info("Unique single record check 12345")
+
+    for h in logging.getLogger().handlers:
+        h.flush()
+
+    log_files = list(tmp_path.glob("*.log"))
+    assert len(log_files) == 1
+    content = log_files[0].read_text(encoding="utf-8")
+    assert content.count("Unique single record check 12345") == 1
 
 
 def test_discord_logger_level_tuning(tmp_path: pathlib.Path) -> None:
