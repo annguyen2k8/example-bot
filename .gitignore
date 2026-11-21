@@ -5,7 +5,8 @@ __pycache__/
 
 # Environment variables & secrets
 .env
-config.json
+.env.*
+!.env.example
 
 # Logs
 logs/

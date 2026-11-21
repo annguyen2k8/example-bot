@@ -1,16 +1,14 @@
 """Application entry point for ExampleBot.
 
-Handles configuration loading, logging initialization, database lifecycle,
-and Discord bot bootstrap.
+Handles environment variable configuration loading, logging initialization,
+database lifecycle, and Discord bot bootstrap.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
-import signal
 import sys
-from typing import Any, Dict, Optional, Union
+from typing import Optional, Union
 
 from bot.client import ExampleBot
 from bot.config import BotConfig
@@ -23,26 +21,31 @@ logger = get_logger("bootstrap")
 async def async_main(config: Optional[BotConfig] = None) -> None:
     """Asynchronous entry point orchestrating bot and database lifecycle."""
     if config is None:
-        config = BotConfig.load()
+        try:
+            config = BotConfig.load()
+        except ValueError as e:
+            logger.critical("Configuration error: %s", e)
+            sys.exit(1)
 
     setup_logging(
         logs_dir=config.logs_dir,
         log_level=config.log_level,
     )
 
-    if not config.token or config.token == "<token>":
-        logger.critical(
-            "Discord bot token is missing or unset. "
-            "Please set DISCORD_TOKEN in .env or provide 'token' in config.json."
-        )
+    try:
+        config.validate(require_token=True)
+    except ValueError as e:
+        logger.critical("Configuration validation error: %s", e)
         sys.exit(1)
+
+    logger.info("Runtime configuration initialized: %s", config)
 
     mongo_manager: Optional[MongoManager] = None
     if config.mongodb_uri:
-        logger.info("Initializing MongoDB manager...")
+        logger.info("Initializing MongoDB manager (%s)...", config.mongodb_database)
         mongo_manager = MongoManager(
             uri=config.mongodb_uri,
-            db_name=config.mongodb_db_name,
+            db_name=config.mongodb_database,
             max_pool_size=config.mongodb_max_pool_size,
             min_pool_size=config.mongodb_min_pool_size,
             server_selection_timeout_ms=config.mongodb_timeout_ms,
@@ -62,21 +65,10 @@ async def async_main(config: Optional[BotConfig] = None) -> None:
         sys.exit(1)
 
 
-def start_bot(config_source: Optional[Union[Dict[str, Any], BotConfig, str]] = None) -> None:
-    """Synchronous launcher provided for backward compatibility."""
+def start_bot(config_source: Optional[Union[BotConfig, str]] = None) -> None:
+    """Synchronous launcher provided for entrypoint invocation."""
     if isinstance(config_source, BotConfig):
         cfg = config_source
-    elif isinstance(config_source, dict):
-        cfg = BotConfig(
-            token=config_source.get("token", ""),
-            command_prefix=config_source.get("command_prefix", ["!", "?"]),
-            description=config_source.get("description", "I'm a example bot!"),
-            embed_color=config_source.get("embed_color"),
-            mongodb_uri=config_source.get("mongodb_uri"),
-            mongodb_db_name=config_source.get("mongodb_db_name", "example_bot"),
-            log_level=config_source.get("log_level", "INFO"),
-            logs_dir=config_source.get("logs_dir", "logs"),
-        )
     elif isinstance(config_source, str):
         cfg = BotConfig.load(config_source)
     else:

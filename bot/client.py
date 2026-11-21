@@ -5,9 +5,10 @@ from __future__ import annotations
 import asyncio
 import datetime
 import pathlib
-from typing import Any, List, Optional
+from typing import Any, Coroutine, List, Optional, Set, TypeVar
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from bot.config import BotConfig
@@ -17,6 +18,21 @@ from database.repositories.bot_stats import BotStatsRepository
 from database.repositories.guild_settings import GuildSettingsRepository
 
 logger = get_logger("client")
+T = TypeVar("T")
+
+
+class AppCommandTree(app_commands.CommandTree):
+    """Custom command tree tracking application and slash command lifecycles."""
+
+    async def _call(self, interaction: discord.Interaction) -> None:  # type: ignore[override]
+        client: ExampleBot = self.client  # type: ignore[assignment]
+        if hasattr(client, "_on_command_started"):
+            client._on_command_started()
+        try:
+            await super()._call(interaction)
+        finally:
+            if hasattr(client, "_on_command_finished"):
+                await client._on_command_finished()
 
 
 async def get_command_prefix(bot: ExampleBot, message: discord.Message) -> List[str]:
@@ -43,11 +59,13 @@ class ExampleBot(commands.Bot):
     ) -> None:
         """Initialize the bot with configuration and optional database manager."""
         intents = kwargs.pop("intents", discord.Intents.all())
+        tree_cls = kwargs.pop("tree_cls", AppCommandTree)
 
         super().__init__(
             command_prefix=get_command_prefix,
             description=config.description,
             intents=intents,
+            tree_cls=tree_cls,
             **kwargs,
         )
 
@@ -59,38 +77,59 @@ class ExampleBot(commands.Bot):
         self.guild_settings: Optional[GuildSettingsRepository] = None
         self.bot_stats: Optional[BotStatsRepository] = None
 
-        # In-flight command tracking for graceful teardown
+        # Lock to eliminate race conditions during concurrent database reconnections
+        self._db_lock = asyncio.Lock()
+
+        # Active commands and background task tracking for safe teardown
         self._active_commands: int = 0
         self._all_commands_done: asyncio.Event = asyncio.Event()
         self._all_commands_done.set()
+        self._background_tasks: Set[asyncio.Task[Any]] = set()
+
+    def create_tracked_task(
+        self,
+        coro: Coroutine[Any, Any, T],
+        *,
+        name: Optional[str] = None,
+    ) -> asyncio.Task[T]:
+        """Create and track an asynchronous background task to ensure safe completion during shutdown."""
+        task = asyncio.get_running_loop().create_task(coro, name=name)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def ensure_database_ready(self) -> bool:
-        """Ensure MongoDB connection and repositories are ready, reconnecting if previously degraded."""
+        """Ensure MongoDB connection and repositories are ready without concurrent duplicate connects."""
         if self.mongo is None:
             return False
 
         if self.mongo.is_connected and self.guild_settings is not None and self.bot_stats is not None:
             return True
 
-        try:
-            if not self.mongo.is_connected:
-                await self.mongo.connect()
-
-            if self.mongo.db is not None:
-                self.guild_settings = GuildSettingsRepository(self.mongo.db["guild_settings"])
-                self.bot_stats = BotStatsRepository(self.mongo.db["bot_stats"])
-
-                logger.info("Initializing collection indexes...")
-                await self.guild_settings.create_indexes()
-                await self.bot_stats.create_indexes()
-                logger.info("Database repositories ready.")
+        async with self._db_lock:
+            # Double-check connection state after acquiring lock
+            if self.mongo.is_connected and self.guild_settings is not None and self.bot_stats is not None:
                 return True
-        except Exception as e:
-            logger.warning("Failed to establish database connection/repositories: %s", e)
-            self.guild_settings = None
-            self.bot_stats = None
 
-        return False
+            try:
+                if not self.mongo.is_connected:
+                    await self.mongo.connect()
+
+                if self.mongo.db is not None:
+                    self.guild_settings = GuildSettingsRepository(self.mongo.db["guild_settings"])
+                    self.bot_stats = BotStatsRepository(self.mongo.db["bot_stats"])
+
+                    logger.info("Initializing collection indexes...")
+                    await self.guild_settings.create_indexes()
+                    await self.bot_stats.create_indexes()
+                    logger.info("Database repositories ready.")
+                    return True
+            except Exception as e:
+                logger.warning("Failed to establish database connection/repositories: %s", e)
+                self.guild_settings = None
+                self.bot_stats = None
+
+            return False
 
     async def setup_hook(self) -> None:
         """Asynchronous initialization hook called before the bot connects to Discord gateway."""
@@ -174,13 +213,29 @@ class ExampleBot(commands.Bot):
         except Exception as e:
             logger.error("Error while closing Discord client session: %s", e)
 
-        # 2. Wait for in-flight commands to finish accessing database
-        if self._active_commands > 0:
-            logger.info("Waiting for %d in-flight command(s) to finish...", self._active_commands)
+        # 2. Wait for in-flight commands and background tasks to finish accessing database
+        has_pending = (self._active_commands > 0) or bool(self._background_tasks)
+        if has_pending:
+            logger.info(
+                "Waiting for %d in-flight command(s) and %d background task(s) to finish...",
+                self._active_commands,
+                len(self._background_tasks),
+            )
             try:
-                await asyncio.wait_for(self._all_commands_done.wait(), timeout=5.0)
+                wait_tasks = []
+                if self._active_commands > 0:
+                    wait_tasks.append(self._all_commands_done.wait())
+                if self._background_tasks:
+                    wait_tasks.append(asyncio.gather(*self._background_tasks, return_exceptions=True))
+
+                await asyncio.wait_for(asyncio.gather(*wait_tasks), timeout=5.0)
             except asyncio.TimeoutError:
-                logger.warning("Grace timeout reached; proceeding with database shutdown.")
+                logger.warning("Grace timeout reached; cancelling remaining tasks before database disconnect.")
+                for task in list(self._background_tasks):
+                    if not task.done():
+                        task.cancel()
+                if self._background_tasks:
+                    await asyncio.gather(*list(self._background_tasks), return_exceptions=True)
 
         # 3. Disconnect MongoDB connection pool
         if self.mongo is not None and self.mongo.is_connected:
@@ -203,17 +258,21 @@ class ExampleBot(commands.Bot):
             round(self.latency * 1000),
         )
 
-    async def on_command(self, ctx: commands.Context) -> None:
-        """Track beginning of command execution."""
+    def _on_command_started(self) -> None:
+        """Internal tracker called when any command (prefix or application) begins."""
         self._active_commands += 1
         self._all_commands_done.clear()
 
     async def _on_command_finished(self) -> None:
-        """Track completion of command execution."""
+        """Internal tracker called when any command (prefix or application) finishes."""
         if self._active_commands > 0:
             self._active_commands -= 1
             if self._active_commands == 0:
                 self._all_commands_done.set()
+
+    async def on_command(self, ctx: commands.Context) -> None:
+        """Track beginning of prefix command execution."""
+        self._on_command_started()
 
     async def on_command_completion(self, ctx: commands.Context) -> None:
         """Track command metrics upon successful completion."""
@@ -231,7 +290,7 @@ class ExampleBot(commands.Bot):
         ctx: commands.Context,
         error: commands.CommandError,
     ) -> None:
-        """Global error handling for command execution."""
+        """Global error handling for prefix command execution."""
         try:
             if isinstance(error, commands.CommandInvokeError):
                 error = error.original  # type: ignore[assignment]

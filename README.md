@@ -7,10 +7,10 @@ A modern, modular, type-safe Discord bot built with [discord.py](https://github.
 ## Overview
 
 ExampleBot provides a robust, production-ready foundation for Discord bots with:
-- **Centralized Configuration**: Environment variables (`.env`) with JSON fallback and connection pool tuning.
+- **Centralized Configuration**: 100% environment variable driven (`.env` for local dev, direct injected env vars in production) with strict type/range validation, pool tuning, and secret masking.
 - **Native Asynchronous MongoDB**: Powered by PyMongo 4.9+ `AsyncMongoClient`, avoiding deprecated drivers (`motor`) and external threadpool overhead.
 - **Degraded Offline Resilience**: Bot operates smoothly in offline mode if MongoDB is unavailable; commands degrade gracefully without crashing, and reconnect dynamically when the database returns.
-- **Graceful Shutdown**: Active in-flight commands and background tasks complete before database sockets are disconnected.
+- **Graceful Shutdown**: Active in-flight commands (prefix and slash/application commands) and background tasks complete or cancel cleanly before database sockets are disconnected.
 - **Dynamic Guild Prefixes**: Server-specific command prefixes stored in MongoDB with automatic fallback to default prefixes.
 - **Domain Repositories**: Focused Data Access Layer with automated, idempotent index management.
 - **Dynamic Cog Loader**: Safe discovery of modular command extensions without blocking loops.
@@ -82,7 +82,10 @@ example-bot/
 
 ## Configuration
 
-Copy the example environment file and configure your credentials:
+ExampleBot is configured entirely via environment variables.
+
+### Local Development
+Copy the template `.env.example` file to `.env`:
 
 ```bash
 cp .env.example .env
@@ -91,15 +94,15 @@ cp .env.example .env
 Edit `.env`:
 
 ```ini
-# Discord Credentials
+# Discord Credentials (required)
 DISCORD_TOKEN=your_bot_token_here
 COMMAND_PREFIX=!,?
-BOT_DESCRIPTION=I'm a example bot!
+BOT_DESCRIPTION=I'm an example bot!
 EMBED_COLOR=0x5865F2
 
 # MongoDB Database (leave empty or unset if not using database)
 MONGODB_URI=mongodb://localhost:27017
-MONGODB_DB_NAME=example_bot
+MONGODB_DATABASE=example_bot
 MONGODB_MAX_POOL_SIZE=20
 MONGODB_MIN_POOL_SIZE=0
 MONGODB_TIMEOUT_MS=5000
@@ -110,7 +113,15 @@ LOGS_DIR=logs
 SYNC_COMMANDS_ON_STARTUP=false
 ```
 
-Alternatively, you can provide configuration via `config.json` (see `config.example.json`). Environment variables always take precedence.
+### Production Deployment
+In production environments (Docker, Kubernetes, systemd, cloud platforms), configure variables directly in the environment without needing a `.env` file. Runtime configuration is 100% environment-variable driven (no JSON files or dual-configuration fallback). All secrets (`DISCORD_TOKEN`, `MONGODB_URI` passwords) are automatically redacted in logs and string representations.
+
+Configuration validation checks:
+- Required `DISCORD_TOKEN` on startup.
+- `MONGODB_MIN_POOL_SIZE >= 0` and `MONGODB_MAX_POOL_SIZE >= 1`.
+- `MONGODB_MIN_POOL_SIZE <= MONGODB_MAX_POOL_SIZE`.
+- `MONGODB_TIMEOUT_MS >= 100`.
+- Valid Python log level (`DEBUG`, `INFO`, `WARNING`, `ERROR`, `CRITICAL`).
 
 ---
 
@@ -157,4 +168,4 @@ Run the full automated test suite with `pytest`:
 pytest -v
 ```
 
-All 36 unit and integration tests execute offline without requiring active external Discord or MongoDB credentials.
+All 43 unit and integration tests execute offline without requiring active external Discord or MongoDB credentials.

@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from pymongo.errors import ConnectionFailure
 
-from bot.client import ExampleBot, get_command_prefix
+from bot.client import AppCommandTree, ExampleBot, get_command_prefix
 from bot.config import BotConfig
 from database.connection import MongoManager
 
@@ -95,7 +95,6 @@ async def test_shutdown_waits_for_active_commands(test_config: BotConfig) -> Non
     assert bot._active_commands == 1
     assert not bot._all_commands_done.is_set()
 
-    # Track order of operations
     events = []
 
     async def delayed_command_completion() -> None:
@@ -113,14 +112,111 @@ async def test_shutdown_waits_for_active_commands(test_config: BotConfig) -> Non
 
     with patch.object(bot, "is_closed", return_value=False):
         with patch("discord.ext.commands.Bot.close", new_callable=AsyncMock, side_effect=mock_super_close):
-            # Run delayed command completion concurrently with close
             asyncio.create_task(delayed_command_completion())
             await bot.close()
 
     assert bot._active_commands == 0
     assert bot._all_commands_done.is_set()
-    # Verify command finished before database was disconnected!
     assert events == ["gateway_closed", "command_done", "db_disconnected"]
+
+
+@pytest.mark.asyncio
+async def test_tracked_background_tasks_graceful_shutdown(test_config: BotConfig) -> None:
+    """Ensure shutdown tracks background tasks and cancels them safely on timeout."""
+    mock_mongo = MagicMock(spec=MongoManager)
+    mock_mongo.is_connected = True
+    mock_mongo.disconnect = AsyncMock()
+
+    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+
+    task_cancelled = False
+
+    async def long_running_task() -> None:
+        nonlocal task_cancelled
+        try:
+            await asyncio.sleep(10.0)
+        except asyncio.CancelledError:
+            task_cancelled = True
+            raise
+
+    # Spawn tracked task
+    task = bot.create_tracked_task(long_running_task(), name="test-bg-task")
+    assert task in bot._background_tasks
+    await asyncio.sleep(0)  # Yield to loop so task starts running
+
+    with patch.object(bot, "is_closed", return_value=False):
+        with patch("discord.ext.commands.Bot.close", new_callable=AsyncMock):
+            # Patch wait_for timeout to 0.05s so the test runs fast
+            with patch("asyncio.wait_for", side_effect=asyncio.TimeoutError):
+                await bot.close()
+
+    assert task_cancelled is True
+    mock_mongo.disconnect.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_app_command_tree_lifecycle_tracking(test_config: BotConfig) -> None:
+    """Ensure AppCommandTree tracks slash command invocations in _active_commands."""
+    bot = ExampleBot(config=test_config)
+    tree = bot.tree
+
+    assert isinstance(tree, AppCommandTree)
+    assert bot._active_commands == 0
+
+    mock_interaction = MagicMock()
+
+    # Track that _on_command_started was active during _call
+    active_during_call = None
+
+    async def mock_super_call(interaction: Any) -> None:
+        nonlocal active_during_call
+        active_during_call = bot._active_commands
+
+    with patch("discord.app_commands.tree.CommandTree._call", side_effect=mock_super_call):
+        await tree._call(mock_interaction)
+
+    assert active_during_call == 1
+    assert bot._active_commands == 0
+    assert bot._all_commands_done.is_set()
+
+
+@pytest.mark.asyncio
+async def test_concurrent_database_reconnection(test_config: BotConfig) -> None:
+    """Ensure multiple concurrent ensure_database_ready() calls are serialized without duplicate connects."""
+    mock_mongo = MagicMock(spec=MongoManager)
+    mock_mongo.is_connected = False
+    mock_mongo.db = MagicMock()
+
+    connect_call_count = 0
+
+    async def delayed_connect() -> None:
+        nonlocal connect_call_count
+        connect_call_count += 1
+        await asyncio.sleep(0.05)
+        mock_mongo.is_connected = True
+
+    mock_mongo.connect = AsyncMock(side_effect=delayed_connect)
+
+    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
+
+    with patch("bot.client.GuildSettingsRepository") as mock_guild_repo, \
+         patch("bot.client.BotStatsRepository") as mock_stats_repo:
+        mock_guild_instance = MagicMock()
+        mock_guild_instance.create_indexes = AsyncMock()
+        mock_guild_repo.return_value = mock_guild_instance
+
+        mock_stats_instance = MagicMock()
+        mock_stats_instance.create_indexes = AsyncMock()
+        mock_stats_repo.return_value = mock_stats_instance
+
+        # Invoke 5 concurrent calls
+        results = await asyncio.gather(*[bot.ensure_database_ready() for _ in range(5)])
+
+        assert all(res is True for res in results)
+        # connect must only have been called ONCE due to asyncio.Lock!
+        assert connect_call_count == 1
+        assert mock_guild_instance.create_indexes.call_count == 1
+        assert mock_stats_instance.create_indexes.call_count == 1
 
 
 @pytest.mark.asyncio
@@ -135,38 +231,9 @@ async def test_setup_hook_handles_db_failure(test_config: BotConfig) -> None:
     with patch.object(bot, "load_cogs", new_callable=AsyncMock) as mock_load_cogs:
         await bot.setup_hook()
         mock_mongo.connect.assert_called_once()
-        # Cog loading must still proceed so bot can run in offline mode
         mock_load_cogs.assert_called_once()
         assert bot.guild_settings is None
         assert bot.bot_stats is None
-
-
-@pytest.mark.asyncio
-async def test_ensure_database_ready_reconnection(test_config: BotConfig) -> None:
-    """Test dynamic reconnection when database becomes available after startup."""
-    mock_mongo = MagicMock(spec=MongoManager)
-    mock_mongo.is_connected = False
-    mock_mongo.db = MagicMock()
-    mock_mongo.connect = AsyncMock()
-
-    bot = ExampleBot(config=test_config, mongo_manager=mock_mongo)
-
-    with patch("bot.client.GuildSettingsRepository") as mock_guild_repo, \
-         patch("bot.client.BotStatsRepository") as mock_stats_repo:
-        mock_guild_instance = MagicMock()
-        mock_guild_instance.create_indexes = AsyncMock()
-        mock_guild_repo.return_value = mock_guild_instance
-
-        mock_stats_instance = MagicMock()
-        mock_stats_instance.create_indexes = AsyncMock()
-        mock_stats_repo.return_value = mock_stats_instance
-
-        # First connection attempt succeeds
-        success = await bot.ensure_database_ready()
-        assert success is True
-        mock_mongo.connect.assert_called_once()
-        assert bot.guild_settings is mock_guild_instance
-        assert bot.bot_stats is mock_stats_instance
 
 
 @pytest.mark.asyncio
